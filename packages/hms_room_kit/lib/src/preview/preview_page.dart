@@ -72,6 +72,7 @@ class _PreviewPageState extends State<PreviewPage> {
     Navigator.of(context).pushReplacement(
       MaterialPageRoute(
         builder: (context) => MeetingScreenController(
+          options: widget.options,
           role: role,
           localPeerNetworkQuality: localPeerNetworkQuality,
           user: nameController.text.trim(),
@@ -130,7 +131,8 @@ class _PreviewPageState extends State<PreviewPage> {
                                     ///It will be shown only if the video is ON
                                     ///and the role has permission to publish video
                                     ///Otherwise it will render the circular avatar
-                                    child: (previewStore.isVideoOn)
+                                    child: (previewStore.isVideoOn &&
+                                            previewStore.localTracks.isNotEmpty)
                                         ? Center(
                                             child: HMSTextureView(
                                               scaleType:

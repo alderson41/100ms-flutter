@@ -28,16 +28,12 @@ class ListenablePeerWidget extends StatelessWidget {
     return ChangeNotifierProvider.value(
       key: ValueKey("${peerTracks[index].uid}video_view"),
       value: peerTracks[index],
-      child: Selector<MeetingStore, HMSTextureViewController>(
+      child: Selector<MeetingStore, HMSTextureViewController?>(
         selector: (_, meetingStore) {
-          ///Here we check if the track is of a screenshare
-          ///we render it using screenshareViewController
-          ///while for other tracks we render it using viewControllers list
+          // Screen tiles own their visible renderer. A shared extra controller
+          // duplicates the sink and lets simultaneous shares replace each other.
           if (peerTracks[index].track?.source == "SCREEN") {
-            meetingStore.screenshareViewController ??= HMSTextureViewController(
-              addTrackByDefault: false,
-            );
-            return meetingStore.screenshareViewController!;
+            return null;
           }
           return meetingStore.viewControllers[index % 6];
         },

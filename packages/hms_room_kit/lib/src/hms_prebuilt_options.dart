@@ -2,6 +2,7 @@ library;
 
 ///Project imports
 import 'package:hms_room_kit/hms_room_kit.dart';
+import 'package:flutter/foundation.dart';
 
 ///[HMSPrebuiltOptions] is a class that is used to pass the options to the prebuilt
 ///It takes following parameters:
@@ -12,6 +13,12 @@ import 'package:hms_room_kit/hms_room_kit.dart';
 ///[iOSScreenshareConfig] - Screen share Config, to enable screen share for iOS
 ///[enableNoiseCancellation] - To enable noise cancellation in prebuilt
 class HMSPrebuiltOptions {
+  /// Native PiP presentation state, owned by the host's active call session.
+  final ValueListenable<bool>? androidPictureInPictureActive;
+  final Future<bool> Function()? onPictureInPictureRequested;
+
+  /// A separate native renderer owns PiP and its background camera lifecycle.
+  final bool androidPictureInPictureUsesNativeView;
   //The name of the user
   final String? userName;
 
@@ -43,6 +50,9 @@ class HMSPrebuiltOptions {
 
   ///[HMSPrebuiltOptions] is a class that is used to pass the options to the prebuilt
   HMSPrebuiltOptions({
+    this.androidPictureInPictureActive,
+    this.onPictureInPictureRequested,
+    this.androidPictureInPictureUsesNativeView = false,
     this.userName,
     this.userId,
     this.endPoints,

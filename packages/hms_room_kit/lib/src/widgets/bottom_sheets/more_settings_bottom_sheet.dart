@@ -620,12 +620,21 @@ class _MoreSettingsBottomSheetState extends State<MoreSettingsBottomSheet> {
                           );
                         },
                       ),
-                  if (Platform.isAndroid)
+                  if (Platform.isAndroid &&
+                      meetingStore.options?.onPictureInPictureRequested != null)
                     ListTile(
                       horizontalTitleGap: 2,
                       onTap: () async {
                         Navigator.pop(context);
-                        // context.read<MeetingStore>().enterPipModeOnAndroid();
+                        final entered = await meetingStore
+                            .options!.onPictureInPictureRequested!();
+                        if (!entered && context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                                content: Text(
+                                    'Picture-in-picture is unavailable. The call is still active.')),
+                          );
+                        }
                       },
                       contentPadding: EdgeInsets.zero,
                       leading: SvgPicture.asset(
@@ -638,7 +647,7 @@ class _MoreSettingsBottomSheetState extends State<MoreSettingsBottomSheet> {
                         ),
                       ),
                       title: HMSSubheadingText(
-                        text: "Enter Pip Mode",
+                        text: "Minimise call",
                         textColor: HMSThemeColors.onSurfaceHighEmphasis,
                         letterSpacing: 0.15,
                         fontWeight: FontWeight.w600,

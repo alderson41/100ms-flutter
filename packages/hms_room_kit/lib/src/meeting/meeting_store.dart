@@ -44,8 +44,35 @@ class MeetingStore extends ChangeNotifier
         HMSTranscriptListener {
   late HMSSDKInteractor _hmsSDKInteractor;
 
-  MeetingStore({required HMSSDKInteractor hmsSDKInteractor}) {
+  final HMSPrebuiltOptions? options;
+
+  MeetingStore({required HMSSDKInteractor hmsSDKInteractor, this.options}) {
     _hmsSDKInteractor = hmsSDKInteractor;
+    options?.androidPictureInPictureActive
+        ?.addListener(_pictureInPictureChanged);
+  }
+
+  void _pictureInPictureChanged() {
+    isPipActive = options?.androidPictureInPictureActive?.value ?? false;
+    if (options?.androidPictureInPictureUsesNativeView == true) {
+      notifyListeners();
+      return;
+    }
+    // Undo only the camera mute that this store applied during backgrounding.
+    if (isPipActive && lastVideoStatus) {
+      lastVideoStatus = false;
+      unawaited(toggleCameraMuteState());
+    }
+    if (!isPipActive &&
+        WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
+      didChangeAppLifecycleState(AppLifecycleState.paused);
+    }
+    notifyListeners();
+  }
+
+  void detachPictureInPicture() {
+    options?.androidPictureInPictureActive
+        ?.removeListener(_pictureInPictureChanged);
   }
 
   bool isSpeakerOn = true;
@@ -1616,6 +1643,7 @@ class MeetingStore extends ChangeNotifier
   // }
 
   void removeListeners() {
+    detachPictureInPicture();
     _hmsSDKInteractor.removeUpdateListener(this);
     _hmsSDKInteractor.removeLogsListener(this);
     _hmsSessionStore?.removeKeyChangeListener(hmsKeyChangeListener: this);
@@ -3327,6 +3355,12 @@ class MeetingStore extends ChangeNotifier
     super.didChangeAppLifecycleState(state);
     if (isRoomEnded) {
       return;
+    }
+    if (Platform.isAndroid &&
+        options?.androidPictureInPictureUsesNativeView == true) return;
+    if (Platform.isAndroid && options?.androidPictureInPictureActive != null) {
+      isPipActive = await HMSAndroidPIPController.isActive();
+      if (isRoomEnded) return;
     }
     if (state == AppLifecycleState.resumed) {
       // if (Platform.isAndroid) {

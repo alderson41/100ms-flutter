@@ -552,6 +552,7 @@ class HmssdkFlutterPlugin :
     override fun onDetachedFromEngine(
         @NonNull binding: FlutterPlugin.FlutterPluginBinding,
     ) {
+        disposeAllTextureViews()
         if (hmssdkFlutterPlugin != null) {
             channel?.setMethodCallHandler(null) ?: Log.e("Channel Error", "Event channel not found")
             meetingEventChannel?.setStreamHandler(null) ?: Log.e("Channel Error", "Meeting event channel not found")
@@ -665,8 +666,20 @@ class HmssdkFlutterPlugin :
     }
 
     private fun destroy(result: Result) {
+        disposeAllTextureViews()
         hmssdk = null
         result.success(null)
+    }
+
+    fun disposeTextureViewsForEngineShutdown(completion: () -> Unit) {
+        disposeAllTextureViews()
+        HMSTextureView.afterPendingCleanup { completion() }
+    }
+
+    private fun disposeAllTextureViews() {
+        val textures = renderers.values.toList()
+        renderers.clear()
+        textures.forEach { it.disposeTextureView() }
     }
 
     /**
@@ -741,6 +754,7 @@ class HmssdkFlutterPlugin :
                             Log.i("HMSTextureView", "Init Add Track called for track: ${track.trackId}")
                             renderer.addTrack(videoTrack, disableAutoSimulcastLayerSelect)
                         } ?: run {
+                            renderer.disposeTextureView()
                             HMSErrorLogger.returnHMSException(
                                 "createTextureView",
                                 "No track with $trackId found",
@@ -750,10 +764,12 @@ class HmssdkFlutterPlugin :
                             return
                         }
                     } ?: run {
+                        renderer.disposeTextureView()
                         HMSErrorLogger.returnHMSException("createTextureView", "trackId is null", " NULL ERROR", result)
                         return
                     }
                 } ?: run {
+                    renderer.disposeTextureView()
                     HMSErrorLogger.returnHMSException("createTextureView", "Room is null", "NULL Error", result)
                     return
                 }
@@ -781,20 +797,14 @@ class HmssdkFlutterPlugin :
     ) {
         val textureId = call.argument<String?>("texture_id") ?: HMSErrorLogger.returnArgumentsError("textureId is null")
 
-        var renderer = renderers["$textureId"]
-
-        if (renderer != null) {
-            renderer.disposeTextureView()
-            renderer = null
-            renderers.remove("$textureId")
+        val renderer = renderers.remove("$textureId")
+        if (renderer == null) {
+            // Session/engine teardown may already have disposed this texture.
             result.success(HMSResultExtension.toDictionary(true, null))
-        } else {
-            HMSErrorLogger.returnHMSException(
-                "disposeTextureView",
-                "No textureView with given textureId found",
-                "Key not found error",
-                result,
-            )
+            return
+        }
+        renderer.disposeTextureView { success ->
+            result.success(HMSResultExtension.toDictionary(success, null))
         }
     }
 

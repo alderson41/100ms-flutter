@@ -806,7 +806,7 @@ abstract class PlatformService {
 
       case HMSUpdateListenerMethod.onRemovedFromRoom:
         if (updateListeners.isEmpty) break;
-        updateListeners.forEach((element) {
+        updateListeners.toList().forEach((element) {
           element.onRemovedFromRoom(
               hmsPeerRemovedFromPeer: arguments['removed_from_room']);
         });
