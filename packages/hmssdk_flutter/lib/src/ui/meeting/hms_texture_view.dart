@@ -149,6 +149,7 @@ class _PlatformViewState extends State<_PlatformView> {
     ///then the application needs to call this method explicitly.
     /// (Android Only)
     if (Platform.isAndroid) {
+      viewController?.clearCallbackMethod(setView);
       if (widget.controller == null) {
         viewController?.disposeTextureView();
       }

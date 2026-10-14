@@ -89,13 +89,22 @@ class _MeetingScreenControllerState extends State<MeetingScreenController> {
     super.initState();
 
     ///Here we create an instance of meeting store, set initial settings and join meeting.
-    _meetingStore = MeetingStore(hmsSDKInteractor: widget.hmsSDKInteractor);
+    _meetingStore = MeetingStore(
+      hmsSDKInteractor: widget.hmsSDKInteractor,
+      options: widget.options,
+    );
     _setInitValues();
     _joinMeeting();
     _setHLSPlayerStore();
   }
 
   ///This function joins the room only if the name is not empty
+  @override
+  void dispose() {
+    _meetingStore.detachPictureInPicture();
+    super.dispose();
+  }
+
   void _joinMeeting() async {
     FocusManager.instance.primaryFocus?.unfocus();
     if (mounted) {
