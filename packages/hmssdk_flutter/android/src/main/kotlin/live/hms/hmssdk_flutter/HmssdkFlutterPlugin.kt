@@ -1,6 +1,9 @@
 package live.hms.hmssdk_flutter
 
 import android.app.Activity
+import android.app.Application
+import android.os.Bundle
+import java.lang.ref.WeakReference
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -21,7 +24,8 @@ import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
 import io.flutter.view.TextureRegistry
-import io.flutter.view.TextureRegistry.SurfaceTextureEntry
+import io.flutter.view.TextureRegistry.SurfaceProducer
+import io.flutter.view.TextureRegistry.SurfaceLifecycle
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -95,6 +99,38 @@ class HmssdkFlutterPlugin :
     private val renderers = HashMap<String, HMSTextureView>()
     private var hmsTextureRegistry: TextureRegistry? = null
     private var hmsBinaryMessenger: BinaryMessenger? = null
+    private var activityRenderingSuspended = false
+    private var videoOutputVisible = true
+    private val renderingSuspended get() = activityRenderingSuspended || !videoOutputVisible
+    private var rendererActivity: WeakReference<Activity>? = null
+    private var lifecycleApplication: Application? = null
+    private val rendererLifecycle = object : Application.ActivityLifecycleCallbacks {
+        override fun onActivityStarted(host: Activity) {
+            if (rendererActivity?.get() === host) setRenderingSuspended(false)
+        }
+
+        override fun onActivityStopped(host: Activity) {
+            if (rendererActivity?.get() === host) setRenderingSuspended(true)
+        }
+
+        override fun onActivityCreated(host: Activity, state: Bundle?) {}
+        override fun onActivityResumed(host: Activity) {}
+        override fun onActivityPaused(host: Activity) {}
+        override fun onActivitySaveInstanceState(host: Activity, state: Bundle) {}
+        override fun onActivityDestroyed(host: Activity) {}
+    }
+
+    private fun setRenderingSuspended(suspended: Boolean) {
+        activityRenderingSuspended = suspended
+        renderers.values.forEach { it.setRenderingSuspended(renderingSuspended) }
+    }
+
+    /** The retained Flutter call can be offstage while a native PiP view renders. */
+    fun setVideoOutputVisible(visible: Boolean) {
+        if (videoOutputVisible == visible) return
+        videoOutputVisible = visible
+        renderers.values.forEach { it.setRenderingSuspended(renderingSuspended) }
+    }
 
     override fun onAttachedToEngine(
         @NonNull flutterPluginBinding: FlutterPlugin.FlutterPluginBinding,
@@ -154,6 +190,8 @@ class HmssdkFlutterPlugin :
             hmsBinaryMessenger = flutterPluginBinding.binaryMessenger
 
             hmssdkFlutterPlugin = this
+            lifecycleApplication = flutterPluginBinding.applicationContext as? Application
+            lifecycleApplication?.registerActivityLifecycleCallbacks(rendererLifecycle)
         } else {
             Log.e("Plugin Warning", "hmssdkFlutterPlugin already exists in onAttachedToEngine")
         }
@@ -552,6 +590,10 @@ class HmssdkFlutterPlugin :
     override fun onDetachedFromEngine(
         @NonNull binding: FlutterPlugin.FlutterPluginBinding,
     ) {
+        lifecycleApplication?.unregisterActivityLifecycleCallbacks(rendererLifecycle)
+        lifecycleApplication = null
+        rendererActivity?.clear()
+        rendererActivity = null
         disposeAllTextureViews()
         if (hmssdkFlutterPlugin != null) {
             channel?.setMethodCallHandler(null) ?: Log.e("Channel Error", "Event channel not found")
@@ -583,16 +625,24 @@ class HmssdkFlutterPlugin :
 
     override fun onAttachedToActivity(binding: ActivityPluginBinding) {
         this.activity = binding.activity
+        rendererActivity = WeakReference(binding.activity)
+        setRenderingSuspended(false)
     }
 
     override fun onDetachedFromActivityForConfigChanges() {
+        setRenderingSuspended(true)
+        rendererActivity?.clear()
+        rendererActivity = null
     }
 
     override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) {
-        this.activity = binding.activity
+        onAttachedToActivity(binding)
     }
 
     override fun onDetachedFromActivity() {
+        setRenderingSuspended(true)
+        rendererActivity?.clear()
+        rendererActivity = null
     }
 
     private fun join(
@@ -741,10 +791,10 @@ class HmssdkFlutterPlugin :
         val addTrackByDefault = call.argument<Boolean?>("add_track_by_def") ?: false
         val disableAutoSimulcastLayerSelect = call.argument<Boolean?>("disable_auto_simulcast_layer_select") ?: false
 
-        val entry: SurfaceTextureEntry? = hmsTextureRegistry?.createSurfaceTexture()
-        entry?.let { surfaceTextureEntry ->
-            val surfaceTexture = surfaceTextureEntry.surfaceTexture()
-            val renderer = HMSTextureView(surfaceTexture, entry)
+        val entry: SurfaceProducer? = hmsTextureRegistry?.createSurfaceProducer(SurfaceLifecycle.resetInBackground)
+        entry?.let { producer ->
+            val renderer = HMSTextureView(producer)
+            renderer.setRenderingSuspended(renderingSuspended)
             if (addTrackByDefault) {
                 val room = hmssdk?.getRoom()
                 room?.let { currentRoom ->
@@ -774,7 +824,7 @@ class HmssdkFlutterPlugin :
                     return
                 }
             }
-            renderers["${surfaceTextureEntry.id()}"] = renderer
+            renderers["${producer.id()}"] = renderer
             val eventChannel =
                 EventChannel(
                     hmsBinaryMessenger,
@@ -783,7 +833,7 @@ class HmssdkFlutterPlugin :
             eventChannel.setStreamHandler(renderer)
             renderer.setTextureViewEventChannel(eventChannel)
             val data = HashMap<String, Any>()
-            data["texture_id"] = surfaceTextureEntry.id()
+            data["texture_id"] = producer.id()
             result.success(HMSResultExtension.toDictionary(true, data))
         } ?: run {
             HMSErrorLogger.returnHMSException("createTextureView", "entry is null", "NULL Error", result)

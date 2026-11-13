@@ -35,6 +35,8 @@ class HMSTextureViewController {
   Future<void>? _initialization;
   Future<void>? _disposal;
   bool _disposed = false;
+  int _viewGeneration = 0;
+  int _trackGeneration = 0;
 
   ///[aspectRatio] is the aspect ratio of the view
   double aspectRatio = 1;
@@ -98,12 +100,32 @@ class HMSTextureViewController {
   ///This callback method is used to refresh the view when certain properties of the view changes.
   void setCallbackMethod(Function? callback) {
     if (Platform.isAndroid && !_disposed) {
+      ++_viewGeneration;
       _updateViewCallback = callback;
     }
   }
 
   void clearCallbackMethod(Function callback) {
-    if (_updateViewCallback == callback) _updateViewCallback = null;
+    if (_updateViewCallback != callback) return;
+    _updateViewCallback = null;
+    final viewGeneration = ++_viewGeneration;
+    final trackGeneration = _trackGeneration;
+    unawaited(_detachView(viewGeneration, trackGeneration));
+  }
+
+  Future<void> _detachView(int viewGeneration, int trackGeneration) async {
+    await _initialization;
+    // A pooled controller may already belong to a newly mounted tile. An old
+    // tile's deferred detach must not remove that tile's current video track.
+    if (_disposed ||
+        _textureId == null ||
+        _viewGeneration != viewGeneration ||
+        _trackGeneration != trackGeneration ||
+        _updateViewCallback != null) {
+      return;
+    }
+    await PlatformService.invokeMethod(PlatformMethod.removeTrack,
+        arguments: {"texture_id": textureId.toString()});
   }
 
   /// (Android Only)
@@ -112,6 +134,8 @@ class HMSTextureViewController {
   ///by the application.
   Future<void> disposeTextureView() {
     _disposed = true;
+    ++_viewGeneration;
+    ++_trackGeneration;
     _updateViewCallback = null;
     return _disposal ??= _disposeTextureView();
   }
@@ -136,8 +160,10 @@ class HMSTextureViewController {
   void addTrack(
       {required HMSVideoTrack track,
       bool? disableAutoSimulcastLayerSelect}) async {
+    final generation = ++_trackGeneration;
     if (Platform.isAndroid) {
       await _initialization;
+      if (generation != _trackGeneration) return;
       if (_disposed || _textureId == null) return;
       await PlatformService.invokeMethod(PlatformMethod.addTrack, arguments: {
         "track_id": track.trackId,
@@ -169,8 +195,10 @@ class HMSTextureViewController {
   /// (Android Only)
   ///[removeTrack] is used to remove the track from the texture view.
   void removeTrack() async {
+    final generation = ++_trackGeneration;
     if (Platform.isAndroid) {
       await _initialization;
+      if (generation != _trackGeneration) return;
       if (_disposed || _textureId == null) return;
       await PlatformService.invokeMethod(PlatformMethod.removeTrack,
           arguments: {"texture_id": textureId.toString()});

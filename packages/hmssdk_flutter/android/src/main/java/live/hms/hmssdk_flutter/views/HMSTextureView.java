@@ -1,6 +1,5 @@
 package live.hms.hmssdk_flutter.views;
 
-import android.graphics.SurfaceTexture;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
@@ -10,7 +9,9 @@ import hms.webrtc.RendererCommon;
 import hms.webrtc.SurfaceEglRenderer;
 import io.flutter.plugin.common.EventChannel;
 import io.flutter.view.TextureRegistry;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -21,8 +22,9 @@ import live.hms.video.utils.SharedEglContext;
 import live.hms.videoview.VideoViewStateChangeListener;
 import live.hms.videoview.common.VideoTrackManager;
 
-/** Texture ownership for the pinned video-view SDK, including full EGL shutdown. */
-public final class HMSTextureView implements EventChannel.StreamHandler {
+/** Owns one Flutter-managed output surface and its WebRTC renderer. */
+public final class HMSTextureView implements EventChannel.StreamHandler,
+        TextureRegistry.SurfaceProducer.Callback {
     private static final String TAG = "HMSTextureView";
     private static final ExecutorService CLEANUP = Executors.newSingleThreadExecutor(runnable -> {
         Thread thread = new Thread(runnable, "HMS-texture-cleanup");
@@ -31,19 +33,26 @@ public final class HMSTextureView implements EventChannel.StreamHandler {
     });
 
     private final Handler main = new Handler(Looper.getMainLooper());
-    private final SurfaceTexture texture;
     private final VideoTrackManager tracks;
-    private TextureRegistry.SurfaceTextureEntry entry;
+    private final List<Consumer<Boolean>> disposalCallbacks = new ArrayList<>();
+    private TextureRegistry.SurfaceProducer producer;
     private SurfaceEglRenderer renderer;
     private EventChannel channel;
     private EventChannel.EventSink sink;
+    private HMSVideoTrack requestedTrack;
+    private boolean disableAutoSimulcast;
+    private boolean activitySuspended;
+    private boolean surfaceAvailable = true;
     private boolean disposed;
+    private boolean disposalComplete;
+    private boolean disposalSucceeded;
+    private int frameWidth = 1;
+    private int frameHeight = 1;
+    private int surfaceGeneration;
 
-    public HMSTextureView(SurfaceTexture texture, TextureRegistry.SurfaceTextureEntry entry) {
-        this.texture = texture;
-        this.entry = entry;
-        // Retain the SDK's track binding and automatic layer selection policies.
-        // Java accesses the pinned library's JVM names without private reflection.
+    public HMSTextureView(TextureRegistry.SurfaceProducer producer) {
+        this.producer = producer;
+        producer.setSize(frameWidth, frameHeight);
         tracks = new VideoTrackManager(
                 () -> renderer,
                 events -> {
@@ -51,58 +60,92 @@ public final class HMSTextureView implements EventChannel.StreamHandler {
                     return Unit.INSTANCE;
                 },
                 () -> {
-                    // A detached track can return. Keep this texture's renderer
-                    // until disposal, instead of repeatedly releasing its surface.
-                    if (renderer != null) renderer.clearFrame();
+                    clearFrameIfVisible();
                     return Unit.INSTANCE;
                 },
                 () -> {
-                    if (renderer != null) renderer.clearFrame();
+                    clearFrameIfVisible();
                     return Unit.INSTANCE;
                 },
                 false);
         tracks.setVideoViewStateChangeListener$videoview_release(new VideoViewStateChangeListener() {
             @Override
             public void onResolutionChange(int width, int height) {
-                if (disposed || width <= 0 || height <= 0 || sink == null) return;
-                Map<String, Object> dimensions = new HashMap<>();
-                dimensions.put("width", width);
-                dimensions.put("height", height);
-                Map<String, Object> event = new HashMap<>();
-                event.put("event_name", "on_resolution_changed");
-                event.put("data", dimensions);
-                sink.success(event);
+                emitResolution(width, height);
             }
 
             @Override
             public void onFirstFrameRendered() {}
         });
+        producer.setCallback(this);
+    }
+
+    private boolean canRender() {
+        return !disposed && surfaceAvailable && !activitySuspended;
+    }
+
+    private void clearFrameIfVisible() {
+        if (canRender() && renderer != null) renderer.clearFrame();
     }
 
     private void initializeRenderer(RendererCommon.RendererEvents events) {
-        if (renderer != null || disposed) return;
-        renderer = new SurfaceEglRenderer("HMS-texture-" + entry.id());
-        renderer.init(SharedEglContext.INSTANCE.getContext(), new RendererCommon.RendererEvents() {
-            @Override
-            public void onFirstFrameRendered() {
-                main.post(() -> {
-                    if (!disposed) events.onFirstFrameRendered();
-                });
-            }
+        if (!canRender()) return;
+        if (renderer == null) {
+            renderer = new SurfaceEglRenderer("HMS-texture-" + producer.id());
+            renderer.init(SharedEglContext.INSTANCE.getContext(), new RendererCommon.RendererEvents() {
+                @Override
+                public void onFirstFrameRendered() {
+                    main.post(() -> {
+                        if (canRender()) events.onFirstFrameRendered();
+                    });
+                }
 
-            @Override
-            public void onFrameResolutionChanged(int width, int height, int rotation) {
-                int rotatedWidth = rotation % 180 == 0 ? width : height;
-                int rotatedHeight = rotation % 180 == 0 ? height : width;
-                if (rotatedWidth <= 0 || rotatedHeight <= 0) return;
-                main.post(() -> {
-                    if (disposed) return;
-                    texture.setDefaultBufferSize(rotatedWidth, rotatedHeight);
-                    events.onFrameResolutionChanged(rotatedWidth, rotatedHeight, rotation);
-                });
-            }
-        }, EglBase.CONFIG_PLAIN, new GlRectDrawer());
-        renderer.createEglSurface(texture);
+                @Override
+                public void onFrameResolutionChanged(int width, int height, int rotation) {
+                    int rotatedWidth = rotation % 180 == 0 ? width : height;
+                    int rotatedHeight = rotation % 180 == 0 ? height : width;
+                    if (rotatedWidth <= 0 || rotatedHeight <= 0) return;
+                    main.post(() -> {
+                        if (!canRender()) return;
+                        if (frameWidth != rotatedWidth || frameHeight != rotatedHeight) {
+                            frameWidth = rotatedWidth;
+                            frameHeight = rotatedHeight;
+                            bindSurface();
+                        }
+                        events.onFrameResolutionChanged(rotatedWidth, rotatedHeight, 0);
+                    });
+                }
+            }, EglBase.CONFIG_PLAIN, new GlRectDrawer());
+        }
+        bindSurface();
+    }
+
+    /** Detach EGL before resizing/replacing its target; never wait on the UI thread. */
+    private void bindSurface() {
+        if (!canRender() || renderer == null) return;
+        final SurfaceEglRenderer target = renderer;
+        final int generation = ++surfaceGeneration;
+        target.pauseVideo();
+        target.releaseEglSurface(() -> main.post(() -> {
+            if (!canRender() || generation != surfaceGeneration || renderer != target
+                    || requestedTrack == null) return;
+            producer.setSize(frameWidth, frameHeight);
+            // Flutter can replace this Surface at resize, resume or memory trim.
+            // It owns the Surface; only the producer may release it.
+            target.createEglSurface(producer.getSurface());
+            target.disableFpsReduction();
+        }));
+    }
+
+    private void emitResolution(int width, int height) {
+        if (disposed || width <= 0 || height <= 0 || sink == null) return;
+        Map<String, Object> dimensions = new HashMap<>();
+        dimensions.put("width", width);
+        dimensions.put("height", height);
+        Map<String, Object> event = new HashMap<>();
+        event.put("event_name", "on_resolution_changed");
+        event.put("data", dimensions);
+        sink.success(event);
     }
 
     public void addTrack(HMSVideoTrack track, boolean disableAutoSimulcastLayerSelect) {
@@ -112,11 +155,13 @@ public final class HMSTextureView implements EventChannel.StreamHandler {
     public void addTrack(HMSVideoTrack track, boolean disableAutoSimulcastLayerSelect,
                          Integer height, Integer width) {
         if (disposed) return;
-        tracks.disableAutoSimulcastLayerSelect$videoview_release(disableAutoSimulcastLayerSelect);
-        if (!disableAutoSimulcastLayerSelect && height != null && width != null) {
+        requestedTrack = track;
+        disableAutoSimulcast = disableAutoSimulcastLayerSelect;
+        tracks.disableAutoSimulcastLayerSelect$videoview_release(disableAutoSimulcast);
+        if (!disableAutoSimulcast && height != null && width != null) {
             setDisplayResolution(width, height);
         }
-        tracks.addTrack(track, true);
+        if (canRender()) tracks.addTrack(track, true);
     }
 
     public void setDisplayResolution(int width, int height) {
@@ -126,7 +171,45 @@ public final class HMSTextureView implements EventChannel.StreamHandler {
     }
 
     public void removeTrack() {
+        requestedTrack = null;
         if (!disposed) tracks.removeTrack$videoview_release();
+    }
+
+    /** Hidden Flutter output must not retain a video sink; native PiP is independent. */
+    public void setRenderingSuspended(boolean suspended) {
+        if (disposed || activitySuspended == suspended) return;
+        activitySuspended = suspended;
+        updateRendering();
+    }
+
+    @Override
+    public void onSurfaceCleanup() {
+        if (disposed) return;
+        surfaceAvailable = false;
+        updateRendering();
+    }
+
+    @Override
+    public void onSurfaceAvailable() {
+        if (disposed) return;
+        surfaceAvailable = true;
+        updateRendering();
+    }
+
+    private void updateRendering() {
+        if (canRender()) {
+            if (requestedTrack != null) {
+                tracks.disableAutoSimulcastLayerSelect$videoview_release(disableAutoSimulcast);
+                tracks.addTrack(requestedTrack, true);
+            }
+            return;
+        }
+        ++surfaceGeneration;
+        tracks.removeTrack$videoview_release();
+        if (renderer != null) {
+            renderer.pauseVideo();
+            renderer.releaseEglSurface(() -> {});
+        }
     }
 
     public void disposeTextureView() {
@@ -134,22 +217,26 @@ public final class HMSTextureView implements EventChannel.StreamHandler {
     }
 
     public void disposeTextureView(Consumer<Boolean> completion) {
-        if (disposed) {
-            completion.accept(true);
+        if (disposalComplete) {
+            completion.accept(disposalSucceeded);
             return;
         }
-        removeTrack();
+        disposalCallbacks.add(completion);
+        if (disposed) return;
         disposed = true;
+        ++surfaceGeneration;
+        requestedTrack = null;
+        tracks.removeTrack$videoview_release();
         sink = null;
         if (channel != null) channel.setStreamHandler(null);
         channel = null;
         tracks.setVideoViewStateChangeListener$videoview_release(null);
         SurfaceEglRenderer releasedRenderer = renderer;
-        TextureRegistry.SurfaceTextureEntry releasedEntry = entry;
+        TextureRegistry.SurfaceProducer releasedProducer = producer;
+        releasedProducer.setCallback(null);
         renderer = null;
-        entry = null;
-        // release() shuts down the render thread and frees all EGL resources.
-        // Its wait belongs off the UI thread; the texture outlives that cleanup.
+        producer = null;
+        // Keep the producer alive until its EGL surface and render thread are gone.
         CLEANUP.execute(() -> {
             boolean success = true;
             try {
@@ -160,13 +247,25 @@ public final class HMSTextureView implements EventChannel.StreamHandler {
             }
             final boolean completed = success;
             main.post(() -> {
-                if (releasedEntry != null) releasedEntry.release();
-                completion.accept(completed);
+                boolean producerReleased = completed;
+                try {
+                    releasedProducer.release();
+                } catch (RuntimeException error) {
+                    producerReleased = false;
+                    Log.e(TAG, "Flutter surface producer shutdown failed", error);
+                }
+                disposalComplete = true;
+                disposalSucceeded = producerReleased;
+                List<Consumer<Boolean>> callbacks = new ArrayList<>(disposalCallbacks);
+                disposalCallbacks.clear();
+                for (Consumer<Boolean> callback : callbacks) {
+                    callback.accept(disposalSucceeded);
+                }
             });
         });
     }
 
-    /** Complete on the UI thread after all queued EGL and texture releases. */
+    /** Complete on the UI thread after all queued EGL and producer releases. */
     public static void afterPendingCleanup(Runnable completion) {
         CLEANUP.execute(() -> new Handler(Looper.getMainLooper()).post(completion));
     }
@@ -177,7 +276,9 @@ public final class HMSTextureView implements EventChannel.StreamHandler {
 
     @Override
     public void onListen(Object arguments, EventChannel.EventSink events) {
-        if (!disposed) sink = events;
+        if (disposed) return;
+        sink = events;
+        emitResolution(frameWidth, frameHeight);
     }
 
     @Override

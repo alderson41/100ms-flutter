@@ -107,31 +107,50 @@ class _PlatformViewState extends State<_PlatformView> {
 
   @override
   void initState() {
-    ///If controller is null, then we create a new controller
-    ///else we use the controller provided by the app.
-    /// (Android Only)
-    if (Platform.isAndroid) {
-      if (widget.controller == null) {
-        viewController = HMSTextureViewController(
-            track: widget.track as HMSVideoTrack,
-            disableAutoSimulcastLayerSelect:
-                widget.disableAutoSimulcastLayerSelect);
-      } else {
-        viewController = widget.controller;
-
-        ///Calling Add Track with new track in case where the addTrack is not called by the app
-        if (!widget.track.isMute) {
-          viewController?.addTrack(
-              track: widget.track as HMSVideoTrack,
-              disableAutoSimulcastLayerSelect:
-                  widget.disableAutoSimulcastLayerSelect);
-        }
-      }
-
-      ///Here we set the callback method which gets called to set the view
-      viewController?.setCallbackMethod(setView);
-    }
     super.initState();
+    _attachController();
+  }
+
+  void _attachController() {
+    if (!Platform.isAndroid) return;
+    viewController = widget.controller ??
+        HMSTextureViewController(
+          track: widget.track as HMSVideoTrack,
+          disableAutoSimulcastLayerSelect:
+              widget.disableAutoSimulcastLayerSelect,
+        );
+    // Claim the view before scheduling an add; an old tile can be disposing
+    // concurrently while RoomKit reassigns this pooled controller.
+    viewController?.setCallbackMethod(setView);
+    if (widget.controller != null && !widget.track.isMute) {
+      viewController?.addTrack(
+        track: widget.track as HMSVideoTrack,
+        disableAutoSimulcastLayerSelect: widget.disableAutoSimulcastLayerSelect,
+      );
+    }
+  }
+
+  void _detachController({required bool owned}) {
+    if (!Platform.isAndroid) return;
+    viewController?.clearCallbackMethod(setView);
+    if (owned) viewController?.disposeTextureView();
+  }
+
+  @override
+  void didUpdateWidget(covariant _PlatformView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!Platform.isAndroid) return;
+    if (!identical(oldWidget.controller, widget.controller)) {
+      _detachController(owned: oldWidget.controller == null);
+      _attachController();
+    } else if (oldWidget.track.trackId != widget.track.trackId ||
+        oldWidget.disableAutoSimulcastLayerSelect !=
+            widget.disableAutoSimulcastLayerSelect) {
+      viewController?.addTrack(
+        track: widget.track as HMSVideoTrack,
+        disableAutoSimulcastLayerSelect: widget.disableAutoSimulcastLayerSelect,
+      );
+    }
   }
 
   ///This sets the view whenever any changes are performed in the properties of the view.
@@ -143,17 +162,7 @@ class _PlatformViewState extends State<_PlatformView> {
 
   @override
   void dispose() {
-    ///Here we dispose the texture view
-    ///
-    ///Note that if the controller is created from app
-    ///then the application needs to call this method explicitly.
-    /// (Android Only)
-    if (Platform.isAndroid) {
-      viewController?.clearCallbackMethod(setView);
-      if (widget.controller == null) {
-        viewController?.disposeTextureView();
-      }
-    }
+    _detachController(owned: widget.controller == null);
     super.dispose();
   }
 
